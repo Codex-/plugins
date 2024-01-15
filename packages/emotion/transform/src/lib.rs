@@ -11,7 +11,9 @@ use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 use sourcemap::{RawToken, SourceMap as RawSourcemap};
 use swc_atoms::JsWord;
-use swc_common::{comments::Comments, util::take::Take, BytePos, SourceMapperDyn, DUMMY_SP};
+use swc_common::{
+    comments::Comments, util::take::Take, BytePos, SourceMapperDyn, Span, SyntaxContext, DUMMY_SP,
+};
 use swc_ecma_ast::{
     ArrayLit, CallExpr, Callee, ClassDecl, ClassMethod, ClassProp, Expr, ExprOrSpread, FnDecl, Id,
     Ident, ImportDecl, ImportSpecifier, JSXAttr, JSXAttrName, JSXAttrOrSpread, JSXAttrValue,
@@ -111,6 +113,7 @@ pub struct EmotionOptions {
     pub auto_label: Option<bool>,
     pub label_format: Option<String>,
     pub import_map: Option<ImportMap>,
+    pub css_prop_optimization: Option<bool>,
 }
 
 impl Default for EmotionOptions {
@@ -121,6 +124,7 @@ impl Default for EmotionOptions {
             auto_label: Some(true),
             label_format: Some("[local]".to_owned()),
             import_map: None,
+            css_prop_optimization: Some(true),
         }
     }
 }
@@ -428,6 +432,16 @@ impl<C: Comments> EmotionTransformer<C> {
                 }))),
             })
         }
+    }
+
+    fn rewrite_css_attr_obj(&mut self) {
+        dbg!("we got this far");
+        // let some_try = Expr::Call(CallExpr {
+        //     span: (),
+        //     callee: (),
+        //     args: (),
+        //     type_args: (),
+        // });
     }
 }
 
@@ -877,6 +891,53 @@ impl<C: Comments> Fold for EmotionTransformer<C> {
         expr.fold_children_with(self)
     }
 
+    fn fold_jsx_attr(&mut self, mut n: JSXAttr) -> JSXAttr {
+        if self.options.css_prop_optimization.is_some() {
+            if let JSXAttrName::Ident(i) = &n.name {
+                if i.as_ref() == "css" {
+                    if let JSXAttrValue::JSXExprContainer(expr_container) =
+                        &n.value.clone().unwrap()
+                    {
+                        if let JSXExpr::Expr(boxed_expr) = &expr_container.expr {
+                            let unboxed_expr = *boxed_expr.clone();
+                            if let Expr::Object(obj_lit) = unboxed_expr {
+                                let some_try = Expr::Call(CallExpr {
+                                    span: Span {
+                                        lo: obj_lit.span.lo(),
+                                        hi: obj_lit.span.lo() + BytePos(1),
+                                        ctxt: SyntaxContext::empty(),
+                                    },
+                                    callee: Callee::Expr(Box::new(Expr::Ident(Ident {
+                                        span: DUMMY_SP,
+                                        sym: "css".into(),
+                                        optional: false,
+                                    }))),
+                                    args: vec![ExprOrSpread {
+                                        spread: None,
+                                        expr: Box::new(Expr::Object(obj_lit)),
+                                    }],
+                                    type_args: None,
+                                });
+
+                                n.value = Some(JSXAttrValue::JSXExprContainer(JSXExprContainer {
+                                    span: DUMMY_SP,
+                                    expr: JSXExpr::Expr(Box::new(some_try)),
+                                }));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        n.fold_children_with(self)
+    }
+
+    // fn fold_object_lit(&mut self, n: ObjectLit) -> ObjectLit {
+    //     dbg!("in object_lit");
+    //     dbg!(&n);
+    //     n.fold_children_with(self)
+    // }
+
     fn fold_jsx_element(&mut self, mut expr: JSXElement) -> JSXElement {
         match &mut expr.opening.name {
             JSXElementName::Ident(i) => {
@@ -887,6 +948,7 @@ impl<C: Comments> Fold for EmotionTransformer<C> {
                 }
             }
             JSXElementName::JSXMemberExpr(member_exp) => {
+                dbg!("in member_exp");
                 if let JSXObject::Ident(i) = &member_exp.obj {
                     if let Some(PackageMeta::Namespace(EmotionModuleConfig {
                         exported_names,
